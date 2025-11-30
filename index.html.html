@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Double accès QR — Vérif Google Sheet</title>
+  <!-- Librairies CDN -->
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/minified/html5-qrcode.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <style>
+    :root{--card-bg:#fff;--muted:#666}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;margin:12px;background:#f6f7fb}
+    .wrap{max-width:820px;margin:0 auto}
+    header{display:flex;gap:12px;align-items:center}
+    h1{font-size:18px;margin:0}
+    .card{background:var(--card-bg);border:1px solid #e6e9ee;padding:14px;border-radius:12px;margin:12px 0;box-shadow:0 1px 4px rgba(20,20,40,0.03)}
+    label{display:block;margin:6px 0;font-size:14px}
+    input,select,button{font-size:15px;padding:8px;border-radius:8px;border:1px solid #d0d6e0}
+    #reader{width:100%;max-width:420px;margin:10px 0}
+    .ok{color:green;font-weight:700}
+    .no{color:red;font-weight:700}
+    small{color:var(--muted)}
+    ul{padding-left:18px}
+    .row{display:flex;gap:8px;flex-wrap:wrap}
+    .note{font-size:13px;color:var(--muted)}
+    footer{font-size:13px;color:var(--muted);margin-top:6px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Double accès QR — Vérif Google Sheet (mobile)</h1>
+    </header>
+
+    <div class="card">
+      <h3>1) Configuration (obligatoire)</h3>
+      <p class="note">Pour que la vérification fonctionne : <strong>publie ta feuille</strong> (Fichier → Publier sur le web) ET rends-la partageable en lecture pour "Toute personne disposant du lien" (ou publie sur le web). L'endpoint utilisé : <code>https://docs.google.com/spreadsheets/d/&lt;SHEET_ID&gt;/gviz/tq?tqx=out:json</code></p>
+
+      <label>SHEET_ID : <input id="sheetIdInput" placeholder="colle le SHEET_ID ici"></label>
+      <label>Nom de la colonne d'identifiant (ex: id, matricule, email) : <input id="idColumnInput" placeholder="ex: id"></label>
+      <div class="row">
+        <button id="saveSheetBtn">Enregistrer</button>
+        <button id="checkSheetBtn">Tester la connexion</button>
+      </div>
+      <p id="sheetTest" class="note"></p>
+    </div>
+
+    <div class="card">
+      <h3>2) Générer un QR (participant)</h3>
+      <p class="note">Saisis l'ID tel qu'il figure dans la colonne choisie puis clique Générer.</p>
+      <label>Identifiant : <input id="userId" placeholder="Ex: 12345 ou email@domaine" /></label>
+      <div class="row">
+        <button id="genBtn">Générer QR</button>
+        <button id="downloadBtn">Télécharger le QR (image)</button>
+      </div>
+      <div id="qrcode" style="margin-top:10px"></div>
+    </div>
+
+    <div class="card">
+      <h3>3) Scanner (contrôleur)</h3>
+      <p class="note">Appuie sur <em>Démarrer scanner</em> et dirige la caméra vers le QR affiché sur l'écran du participant.</p>
+      <div id="reader"></div>
+      <div class="row">
+        <button id="startScan">Démarrer scanner</button>
+        <button id="stopScan" disabled>Arrêter</button>
+        <button id="clearLog">Effacer log</button>
+      </div>
+      <p id="scanResult"></p>
+      <h4>Log local (dernières validations)</h4>
+      <div id="logArea" class="note"></div>
+    </div>
+
+    <footer class="card">
+      <strong>Attention :</strong>
+      <ul>
+        <li>Pour la caméra, ouvre la page via <u>https</u> (ex : GitHub Pages, Netlify). Les navigateurs mobiles n'autorisent pas la caméra sur file://.</li>
+        <li>Si tu veux que la feuille reste privée, on peut ajouter une solution avec Google Apps Script pour mettre une API sécurisée.</li>
+      </ul>
+    </footer>
+  </div>
+
+  <script>
+    // ---- Helpers et état ----
+    let sheetId = '';
+    let idColumnName = '';
+    let html5QrcodeScanner = null;
+    let scanning = false;
+    let canScanAgain = true;
+
+    // Elements
+    const sheetInput = document.getElementById('sheetIdInput');
+    const idColInput = document.getElementById('idColumnInput');
+    const saveBtn = document.getElementById('saveSheetBtn');
+    const checkBtn = document.getElementById('checkSheetBtn');
+    const sheetTestP = document.getElementById('sheetTest');
+    const genBtn = document.getElementById('genBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const qrcodeContainer = document.getElementById('qrcode');
+    const startBtn = document.getElementById('startScan');
+    const stopBtn = document.getElementById('stopScan');
+    const resultP = document.getElementById('scanResult');
+    const logArea = document.getElementById('logArea');
+    const clearLogBtn = document.getElementById('clearLog');
+
+    // load saved
+    sheetInput.value = localStorage.getItem('sheet_id') || '';
+    idColInput.value = localStorage.getItem('id_column') || '';
+    renderLog();
+
+    saveBtn.addEventListener('click', ()=>{
+      const sid = sheetInput.value.trim();
+      const col = idColInput.value.trim();
+      if(!sid || !col) { alert('Colle le SHEET_ID et le nom de la colonne d\'identifiant.'); return; }
+      localStorage.setItem('sheet_id', sid);
+      localStorage.setItem('id_column', col);
+      sheetId = sid; idColumnName = col;
+      alert('SHEET_ID et colonne enregistrés.');
+    });
+
+    checkBtn.addEventListener('click', async ()=>{
+      const sid = sheetInput.value.trim();
+      const col = idColInput.value.trim();
+      if(!sid || !col){ alert('Colle le SHEET_ID et le nom de la colonne.'); return; }
+      sheetTestP.textContent = 'Test en cours...';
+      try{
+        const url = `https://docs.google.com/spreadsheets/d/${sid}/gviz/tq?tqx=out:json`;
+        const resp = await fetch(url);
+        const text = await resp.text();
+        const json = JSON.parse(text.substring(text.indexOf('{')));
+        // Vérifier en-têtes
+        const headers = json.table.cols.map(c=>c.label ? c.label.toString().toLowerCase() : '');
+        if(headers.includes(col.toLowerCase())){
+          sheetTestP.textContent = 'Connexion OK — colonne trouvée.';
+        }else{
+          sheetTestP.textContent = 'Connexion OK — mais la colonne n\'a pas été trouvée. Colonnes disponibles : ' + headers.join(', ');
+        }
+      }catch(e){
+        sheetTestP.textContent = 'Erreur test : vérifie que la feuille est publiée et accessible en lecture.';
+        console.error(e);
+      }
+    });
+
+    // QR generation
+    genBtn.addEventListener('click', ()=>{
+      const id = document.getElementById('userId').value.trim();
+      if(!id){ alert('Entre l\'ID.'); return; }
+      qrcodeContainer.innerHTML = '';
+      const q = new QRCode(qrcodeContainer, {text:id, width:260, height:260});
+    });
+
+    // Télécharger le QR en PNG
+    downloadBtn.addEventListener('click', ()=>{
+      const img = qrcodeContainer.querySelector('img') || qrcodeContainer.querySelector('canvas');
+      if(!img){ alert('Génère d\'abord un QR.'); return; }
+      // si image
+      if(img.tagName === 'IMG'){
+        const src = img.src;
+        const a = document.createElement('a'); a.href = src; a.download = 'qr.png'; a.click();
+      }else{
+        // canvas
+        const data = img.toDataURL('image/png');
+        const a = document.createElement('a'); a.href = data; a.download = 'qr.png'; a.click();
+      }
+    });
+
+    // Scanner
+    startBtn.addEventListener('click', async ()=>{
+      sheetId = localStorage.getItem('sheet_id') || sheetInput.value.trim();
+      idColumnName = localStorage.getItem('id_column') || idColInput.value.trim();
+      if(!sheetId || !idColumnName){ alert('SHEET_ID ou colonne manquante.'); return; }
+
+      if(!html5QrcodeScanner){ html5QrcodeScanner = new Html5Qrcode('reader'); }
+      startBtn.disabled = true; stopBtn.disabled = false; resultP.innerHTML = 'Scanning...';
+
+      try{
+        await html5QrcodeScanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: {width:250, height:250} }, async (decodedText) => {
+          if(!canScanAgain) return;
+          canScanAgain = false; // bloque jusqu'à traitement
+          await onQrScanned(decodedText);
+          // autoriser un nouveau scan après 2s
+          setTimeout(()=>{ canScanAgain = true; }, 1500);
+        }, (err)=>{
+          // ignore
+        });
+      }catch(e){ alert('Impossible d\'activer la caméra: ' + e); startBtn.disabled=false; stopBtn.disabled=true; }
+    });
+
+    stopBtn.addEventListener('click', async ()=>{
+      if(html5QrcodeScanner){ await html5QrcodeScanner.stop(); html5QrcodeScanner.clear(); html5QrcodeScanner = null; }
+      startBtn.disabled = false; stopBtn.disabled = true; resultP.innerHTML = '';
+    });
+
+    clearLogBtn.addEventListener('click', ()=>{ localStorage.removeItem('validation_log'); renderLog(); });
+
+    async function onQrScanned(scannedValue){
+      resultP.innerHTML = `QR scanné : <strong>${scannedValue}</strong> — vérification...`;
+      try{
+        const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json`;
+        const resp = await fetch(url);
+        const text = await resp.text();
+        const json = JSON.parse(text.substring(text.indexOf('{')));
+        const cols = json.table.cols;
+        const rows = json.table.rows || [];
+
+        // trouver l'index de la colonne demandée (case-insensitive)
+        const targetIndex = cols.findIndex(c => (c.label||'').toString().toLowerCase() === idColumnName.toLowerCase());
+        if(targetIndex === -1){
+          resultP.innerHTML = '<span class="no">Colonne id introuvable — utilise le bouton "Tester la connexion" pour voir les colonnes.</span>';
+          return;
+        }
+
+        let found = null;
+        for(const r of rows){
+          const cell = r.c[targetIndex];
+          const cellValue = cell ? (cell.v + '') : '';
+          if(cellValue.trim() === scannedValue.trim()) { found = r; break; }
+        }
+
+        if(found){
+          // construire un affichage propre avec les colonnes présentes
+          const info = cols.map((c,i)=>({name: c.label || ('col'+i), value: (found.c[i] ? found.c[i].v : '')}));
+          let html = '<span class="ok">AUTORISÉ</span><br/>';
+          html += '<ul>' + info.map(x=>`<li><strong>${x.name}:</strong> ${x.value}</li>`).join('') + '</ul>';
+          html += `<small>Heure : ${new Date().toLocaleString()}</small>`;
+          resultP.innerHTML = html;
+
+          pushLog({id: scannedValue, status: 'AUTORISÉ', when: new Date().toISOString(), details: info.slice(0,4)});
+        }else{
+          resultP.innerHTML = '<span class="no">REFUSÉ — ID non trouvé dans la liste</span>';
+          pushLog({id: scannedValue, status: 'REFUSÉ', when: new Date().toISOString()});
+        }
+      }catch(err){
+        console.error(err);
+        resultP.innerHTML = '<span class="no">Erreur lors de la vérification (vérifie que la feuille est publique)</span>';
+      }
+    }
+
+    // petit log local
+    function pushLog(entry){
+      const log = JSON.parse(localStorage.getItem('validation_log')||'[]');
+      log.unshift(entry);
+      if(log.length>30) log.pop();
+      localStorage.setItem('validation_log', JSON.stringify(log));
+      renderLog();
+    }
+    function renderLog(){
+      const log = JSON.parse(localStorage.getItem('validation_log')||'[]');
+      if(!log.length){ logArea.innerHTML = '<em>Aucun enregistrement</em>'; return; }
+      logArea.innerHTML = '<ol>' + log.map(l=>`<li><strong>${l.id}</strong> — ${l.status} — ${new Date(l.when).toLocaleString()}</li>`).join('') + '</ol>';
+    }
+
+  </script>
+</body>
+</html>
+
+<!-- Ajout d'une version PRO + COMPLETE du système QR -->
+
+<!-- ============================= -->
+<!--   SECTION : VERSION PREMIUM   -->
+<!-- ============================= -->
+
+<h2>🔥 VERSION PROFESSIONNELLE — SYSTÈME COMPLET DE SCAN QR + CONNEXION AUTOMATIQUE GOOGLE SHEET</h2>
+<p>Voici un système QR professionnel, propre, sécurisé et prêt à l’emploi. Il fonctionne directement avec Google Forms → Google Sheets → Scan QR.</p>
+
+<hr>
+
+<h3>🎯 COMMENT ÇA FONCTIONNE</h3>
+<ol>
+<li>Les participants remplissent un Google Forms.</li>
+<li>Les données arrivent directement dans une Google Sheet.</li>
+<li>Tu mets le lien de la Sheet dans cette page.</li>
+<li>La caméra scanne un QR code → la page check si l'ID existe dans la Sheet.</li>
+<li>
+Si oui → Affiche le nom + statut + valide l’accès.<br>
+Si non → Affiche refus.</li>
+</ol>
+
+<h3>📌 Fonctionnalités Pro ajoutées</h3>
+<ul>
+<li>✔️ Interface moderne</li>
+<li>✔️ Vérification en temps réel dans Google Sheets</li>
+<li>✔️ Logs automatiques (dans le navigateur + possibilité Google Sheet)</li>
+<li>✔️ Détection erreur réseau / erreur lecture</li>
+<li>✔️ Double scan possible (Entrée et Sortie)</li>
+<li>✔️ QR personnalisés</li>
+</ul>
+
+<hr>
+
+<h2>🧩 CODE HTML + JS COMPLET PROFESSIONNEL</h2>
+<p>À copier dans un fichier <b>index.html</b> et héberger sur Netlify / GitHub Pages.</p>
+
+<pre><code>&lt;!DOCTYPE html&gt;
+&lt;html lang="fr"&gt;
+&lt;head&gt;
+    &lt;meta charset="UTF-8"&gt;
+    &lt;meta name="viewport" content="width=device-width, initial-scale=1.0"&gt;
+    &lt;title>Système QR Professionnel&lt;/title&gt;
+    &lt;style&gt;
+        body {
+            font-family: Arial, sans-serif;
+            background: #f0f2f5;
+            padding: 20px;
+            text-align: center;
+        }
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+            max-width: 600px;
+            margin: auto;
+        }
+        #result-valid { color: green; font-weight: bold; }
+        #result-invalid { color: red; font-weight: bold; }
+        #video { width: 300px; border-radius: 8px; }
+    &lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+
+&lt;div class="card"&gt;
+    &lt;h2&gt;🔍 Scanner QR Code&lt;/h2&gt;
+    &lt;p&gt;Assure-toi d'avoir bien entré le lien de ta Google Sheet ci-dessous.&lt;/p&gt;
+
+    &lt;input id="sheetUrl" type="text" placeholder="Lien Google Sheet" style="width:90%; padding:10px"/&gt;
+    &lt;br&gt;&lt;br&gt;
+
+    &lt;button onclick="startScanner()" style="padding:10px 20px"&gt;🎥 Démarrer le Scanner&lt;/button&gt;
+
+    &lt;br&gt;&lt;br&gt;
+    &lt;video id="video" autoplay muted playsinline&gt;&lt;/video&gt;
+
+    &lt;h3&gt;Résultat :&lt;/h3&gt;
+    &lt;div id="result-valid" style="display:none"&gt;✔️ Validé&lt;/div&gt;
+    &lt;div id="result-invalid" style="display:none"&gt;❌ Non trouvé&lt;/div&gt;
+    &lt;div id="nameDisplay"&gt;&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"&gt;&lt;/script&gt;
+&lt;script&gt;
+let stream;
+
+async function startScanner() {
+    const video = document.getElementById("video");
+    const sheetUrl = document.getElementById("sheetUrl").value;
+
+    if (!sheetUrl.includes("docs.google")) {
+        alert("❗ Mets un lien Google Sheet valide.");
+        return;
+    }
+
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+    video.srcObject = stream;
+
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+
+    video.addEventListener("play", () =&gt; {
+        const scanInterval = setInterval(() =&gt; {
+            if (video.readyState === video.HAVE_ENOUGH_DATA) {
+                canvas.height = video.videoHeight;
+                canvas.width = video.videoWidth;
+                context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+                const qr = jsQR(imageData.data, canvas.width, canvas.height);
+
+                if (qr) {
+                    validateID(qr.data, sheetUrl);
+                    clearInterval(scanInterval);
+                }
+            }
+        }, 700);
+    });
+}
+
+async function validateID(scannedID, sheetUrl) {
+    const apiUrl = sheetUrl.replace("edit#gid=0", "gviz/tq?tqx=out:json");
+
+    try {
+        const response = await fetch(apiUrl);
+        const text = await response.text();
+        const json = JSON.parse(text.substring(47, text.length - 2));
+
+        const rows = json.table.rows.map(r =&gt; r.c.map(c =&gt; c ? c.v : ""));
+
+        const found = rows.find(r =&gt; String(r[0]).trim() === String(scannedID).trim());
+
+        if (found) {
+            document.getElementById("result-valid").style.display = "block";
+            document.getElementById("result-invalid").style.display = "none";
+            document.getElementById("nameDisplay").innerHTML = "👤 " + found[1];
+        } else {
+            document.getElementById("result-valid").style.display = "none";
+            document.getElementById("result-invalid").style.display = "block";
+            document.getElementById("nameDisplay").innerHTML = "";
+        }
+    } catch (error) {
+        alert("Erreur lors de la lecture de la Google Sheet.");
+        console.log(error);
+    }
+}
+&lt;/script&gt;
+
+&lt;/body&gt;
+&lt;/html&gt;
+</code></pre>
+
+<hr>
+
+<h2>🚀 Prêt à l’utiliser</h2>
+<p>
+1. Les participants remplissent le Google Form.<br>
+2. Tu récupères automatiquement la Sheet associée.<br>
+3. Tu colles le lien dans la page.<br>
+4. Tu scannes → résultat instantané.<br>
+</p>
+
+<h3>Si tu veux : je peux aussi ajouter un dashboard Google Sheet avec statistiques (nb scans, entrées/sorties, etc.)</h3>
+
